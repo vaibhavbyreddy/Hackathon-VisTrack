@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VisTrack Swarm | Spatial Consensus Demo</title>
+    <style>
+        body { 
+            margin: 0; overflow: hidden; background-color: #0d0d12; color: #fff; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; height: 100vh;
+        }
+        #sidebar {
+            width: 380px; background: #16161e; padding: 15px; box-shadow: 2px 0 15px rgba(0,0,0,0.8);
+            display: flex; flex-direction: column; overflow-y: auto; z-index: 10;
+        }
+        #viewport-3d { flex-grow: 1; position: relative; }
+        .header { text-align: center; margin-bottom: 15px; border-bottom: 1px solid #333; padding-bottom: 10px;}
+        .header h2 { margin: 0; font-size: 1.2rem; color: #00ffcc; text-transform: uppercase; letter-spacing: 2px;}
+        .header p { margin: 5px 0 0 0; font-size: 0.8rem; color: #aaa; }
+        
+        #feeds {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+        }
+        .cam-container {
+            background: #000; border: 1px solid #333; border-radius: 6px; position: relative;
+            display: flex; flex-direction: column; align-items: center; padding: 5px 0 10px 0;
+        }
+        .cam-canvas {
+            width: 140px; height: 140px; border-radius: 50%; border: 2px solid #222;
+            background: radial-gradient(circle, #1a1a1a 0%, #000 100%);
+        }
+        .cam-label {
+            font-size: 10px; color: #aaa; margin-bottom: 5px; font-weight: bold; text-align: center;
+        }
+        .legend {
+            margin-top: 20px; padding: 15px; background: #0a0a0f; border-radius: 6px; font-size: 0.85rem;
+        }
+        .legend-item { display: flex; align-items: center; margin-bottom: 8px; }
+        .dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 10px; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+
+    <div id="sidebar">
+        <div class="header">
+            <h2>VisTrack Swarm</h2>
+            <p>Infinite Ray Intersection Demo</p>
+        </div>
+        
+        <div id="feeds"></div>
+        
+        <div class="legend">
+            <div class="legend-item"><div class="dot" style="background: #00ffcc; box-shadow: 0 0 8px #00ffcc;"></div> <strong>Infinite True Ray</strong></div>
+            <div class="legend-item"><div class="dot" style="background: #ff3333;"></div> <strong>Infinite Noise Ray</strong></div>
+            <p style="color: #888; line-height: 1.4; margin-top: 10px;">
+                Cameras do not know depth. They project infinite rays into the sky. 
+                Noise rays shoot into empty space. True rays mathematically converge at the target's exact 3D coordinates.
+            </p>
+        </div>
+    </div>
+
+    <div id="viewport-3d"></div>
+
+    <script>
+        // --- 1. CONFIGURATION ---
+        const NUM_CAMERAS = 10;
+        const AREA_SIZE = 500; // 500m x 500m
+        const NOISE_PER_CAM = 3; // Number of false targets per camera
+        const RAY_LENGTH = 800; // Extend rays far beyond the target
+        
+        let time = 0;
+        const cameras = [];
+        const contexts = [];
+        const noiseData = [];
+        
+        // --- 2. SETUP 2D SENSOR UI (Fisheye Projection) ---
+        const feedsDiv = document.getElementById('feeds');
+        for(let i = 0; i < NUM_CAMERAS; i++) {
+            const container = document.createElement('div');
+            container.className = 'cam-container';
+            
+            const label = document.createElement('div');
+            label.className = 'cam-label';
+            label.innerHTML = `NODE-0${i+1}<br><span style="color:#00ffcc">LOCKED</span>`;
+            
+            const canvas = document.createElement('canvas');
+            canvas.className = 'cam-canvas';
+            canvas.width = 140;
+            canvas.height = 140;
+            
+            container.appendChild(label);
+            container.appendChild(canvas);
+            feedsDiv.appendChild(container);
+            contexts.push(canvas.getContext('2d'));
+
+            let camNoise = [];
+            for(let n = 0; n < NOISE_PER_CAM; n++) {
+                camNoise.push({
+                    azimuth: Math.random() * Math.PI * 2,
+                    elevation: Math.random() * (Math.PI / 2),
+                    speedAz: (Math.random() - 0.5) * 0.02,
+                    speedEl: (Math.random() - 0.5) * 0.01
+                });
+            }
+            noiseData.push(camNoise);
+        }
+
+        // --- 3. SETUP 3D SCENE ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0d0d12);
+
+        const container3D = document.getElementById('viewport-3d');
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(container3D.clientWidth, container3D.clientHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container3D.appendChild(renderer.domElement);
+
+        const mainCamera = new THREE.PerspectiveCamera(50, container3D.clientWidth / container3D.clientHeight, 0.1, 3000);
+        mainCamera.position.set(0, 300, -600);
+        const controls = new THREE.OrbitControls(mainCamera, renderer.domElement);
+        controls.target.set(0, 150, 0);
+        controls.update();
+
+        // 500x500m Grid
+        const gridHelper = new THREE.GridHelper(AREA_SIZE, 50, 0x888888, 0x444444);
+        scene.add(gridHelper);
+
+        // --- 4. CREATE CAMERAS & RAYS IN 3D ---
+        const trueRayLines = [];
+        const noiseRayLines = [];
+
+        for(let i = 0; i < NUM_CAMERAS; i++) {
+            // Random placement within 500x500 grid
+            const cx = (Math.random() - 0.5) * AREA_SIZE;
+            const cz = (Math.random() - 0.5) * AREA_SIZE;
+            cameras.push({ x: cx, y: 0, z: cz });
+
+            // Draw Camera Box
+            const boxGeo = new THREE.BoxGeometry(6, 3, 6);
+            const boxMat = new THREE.MeshBasicMaterial({ color: 0x666666 });
+            const box = new THREE.Mesh(boxGeo, boxMat);
+            box.position.set(cx, 1.5, cz);
+            scene.add(box);
+
+            // True Ray (Target) - Max Opacity, thickness increased where supported
+            const trueMat = new THREE.LineBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 1.0, linewidth: 3 });
+            const trueGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(cx, 0, cz), new THREE.Vector3(0,0,0)]);
+            const trueLine = new THREE.Line(trueGeo, trueMat);
+            scene.add(trueLine);
+            trueRayLines.push(trueLine);
+
+            // Noise Rays - Increased Opacity for better visibility
+            const camNoiseLines = [];
+            for(let n = 0; n < NOISE_PER_CAM; n++) {
+                const noiseMat = new THREE.LineBasicMaterial({ color: 0xff3333, transparent: true, opacity: 0.8, linewidth: 4 });
+                const noiseGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(cx, 0, cz), new THREE.Vector3(0,0,0)]);
+                const noiseLine = new THREE.Line(noiseGeo, noiseMat);
+                scene.add(noiseLine);
+                camNoiseLines.push(noiseLine);
+            }
+            noiseRayLines.push(camNoiseLines);
+        }
+
+        // --- 5. CREATE TARGET (The Drone) ---
+        const targetGeo = new THREE.SphereGeometry(4, 16, 16);
+        const targetMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+        const target = new THREE.Mesh(targetGeo, targetMat);
+        scene.add(target);
+
+        // Glow effect for Intersection Consensus
+        const glowGeo = new THREE.SphereGeometry(12, 16, 16);
+        const glowMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.6 });
+        const glow = new THREE.Mesh(glowGeo, glowMat);
+        scene.add(glow);
+
+        // Trail
+        const trailGeo = new THREE.BufferGeometry();
+        const trailMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.3 });
+        const trail = new THREE.Line(trailGeo, trailMat);
+        scene.add(trail);
+        const trailPoints = [];
+
+        // --- 6. MAIN ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+            time += 0.012;
+            
+            // Complex Target Trajectory
+            const tx = 200 * Math.sin(time * 0.7);
+            const tz = 200 * Math.sin(time * 0.4) * Math.cos(time * 0.3);
+            const ty = 150 + 50 * Math.sin(time * 1.1); 
+            
+            target.position.set(tx, ty, tz);
+            glow.position.set(tx, ty, tz);
+
+            // Update Trail
+            trailPoints.push(new THREE.Vector3(tx, ty, tz));
+            if (trailPoints.length > 300) trailPoints.shift();
+            trailGeo.setFromPoints(trailPoints);
+
+            // Update Cameras, Rays, and 2D Canvases
+            cameras.forEach((cam, i) => {
+                const ctx = contexts[i];
+                ctx.clearRect(0, 0, 140, 140);
+
+                // Draw Grid on Canvas
+                ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
+                ctx.beginPath(); ctx.arc(70, 70, 68, 0, Math.PI*2); ctx.stroke();
+                ctx.beginPath(); ctx.arc(70, 70, 34, 0, Math.PI*2); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(70, 0); ctx.lineTo(70, 140); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(0, 70); ctx.lineTo(140, 70); ctx.stroke();
+
+                // --- Process True Target ---
+                const dx = tx - cam.x;
+                const dy = ty - cam.y;
+                const dz = tz - cam.z;
+                const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                
+                // Fisheye Projection Math
+                const groundDist = Math.sqrt(dx*dx + dz*dz);
+                const elevation = Math.atan2(dy, groundDist);
+                const azimuth = Math.atan2(dz, dx);
+                const rCanvas = 70 * (1 - (elevation / (Math.PI / 2)));
+                
+                // Draw True Target on 2D
+                if (elevation > 0) { 
+                    const px = 70 + rCanvas * Math.cos(azimuth);
+                    const py = 70 + rCanvas * Math.sin(azimuth);
+                    
+                    ctx.beginPath();
+                    ctx.arc(px, py, 4, 0, Math.PI*2);
+                    ctx.fillStyle = '#00ffcc';
+                    ctx.fill();
+                    
+                    ctx.strokeStyle = '#00ffcc'; ctx.lineWidth = 1;
+                    ctx.strokeRect(px-7, py-7, 14, 14);
+                }
+
+                // --- NEW: Calculate Infinite True Ray ---
+                // Normalize the direction vector and multiply by RAY_LENGTH
+                const extDx = (dx / dist) * RAY_LENGTH;
+                const extDy = (dy / dist) * RAY_LENGTH;
+                const extDz = (dz / dist) * RAY_LENGTH;
+
+                const tPos = trueRayLines[i].geometry.attributes.position.array;
+                tPos[3] = cam.x + extDx; 
+                tPos[4] = cam.y + extDy; 
+                tPos[5] = cam.z + extDz;
+                trueRayLines[i].geometry.attributes.position.needsUpdate = true;
+
+                // --- Process Noise ---
+                noiseData[i].forEach((n, nIdx) => {
+                    n.azimuth += n.speedAz;
+                    n.elevation += n.speedEl;
+                    
+                    if(n.elevation < 0.1) { n.elevation = 0.1; n.speedEl *= -1; }
+                    if(n.elevation > Math.PI/2) { n.elevation = Math.PI/2; n.speedEl *= -1; }
+
+                    const nRadius = 70 * (1 - (n.elevation / (Math.PI / 2)));
+                    const nx = 70 + nRadius * Math.cos(n.azimuth);
+                    const ny = 70 + nRadius * Math.sin(n.azimuth);
+                    
+                    ctx.beginPath();
+                    ctx.arc(nx, ny, 3, 0, Math.PI*2);
+                    ctx.fillStyle = '#ff3333';
+                    ctx.fill();
+
+                    // Update Noise 3D Ray (Extended to match true rays)
+                    const rayDx = RAY_LENGTH * Math.cos(n.elevation) * Math.cos(n.azimuth);
+                    const rayDz = RAY_LENGTH * Math.cos(n.elevation) * Math.sin(n.azimuth);
+                    const rayDy = RAY_LENGTH * Math.sin(n.elevation);
+
+                    const nPos = noiseRayLines[i][nIdx].geometry.attributes.position.array;
+                    nPos[3] = cam.x + rayDx; 
+                    nPos[4] = cam.y + rayDy; 
+                    nPos[5] = cam.z + rayDz;
+                    noiseRayLines[i][nIdx].geometry.attributes.position.needsUpdate = true;
+                });
+            });
+
+            renderer.render(scene, mainCamera);
+        }
+
+        window.addEventListener('resize', () => {
+            mainCamera.aspect = container3D.clientWidth / container3D.clientHeight;
+            mainCamera.updateProjectionMatrix();
+            renderer.setSize(container3D.clientWidth, container3D.clientHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>

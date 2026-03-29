@@ -7,7 +7,7 @@ from picamera2 import Picamera2
 
 # --- CONFIGURATION ---
 NODE_ID = socket.gethostname()
-TARGET_IP = "Vaibhavs-MacBook-Pro-2.local" # Your Mac's static IP
+TARGET_IP = "Vaibhavs-MacBook-Pro-2.local"
 TELEMETRY_PORT = 5005
 UPLINK_PORT = 5006
 
@@ -21,11 +21,14 @@ target_cx, target_cy = -1, -1
 node_status = "SEARCHING"
 current_fps = 0.0
 
-# --- UPLINK LISTENER ---
+
+# --- THREAD 1: UPLINK LISTENER ---
 def uplink_listener():
     global current_mode, motion_threshold
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(('0.0.0.0', UPLINK_PORT))
+    print(f"[{NODE_ID}] Command Listener Active on Port {UPLINK_PORT}")
+
     while True:
         try:
             data, _ = sock.recvfrom(1024)
@@ -33,19 +36,25 @@ def uplink_listener():
             if len(cmd) == 3 and cmd[0] == "CMD":
                 if cmd[1] == "MODE":
                     current_mode = cmd[2]
+                    print(f"\n>>> [{NODE_ID}] Switched to {current_mode} mode <<<\n")
                 elif cmd[1] == "THRESH":
                     motion_threshold = int(cmd[2])
+                    print(f"\n>>> [{NODE_ID}] Threshold updated to {motion_threshold} <<<\n")
         except Exception:
             pass
 
-# --- TELEMETRY DOWNLINK ---
+
+# --- THREAD 2: TELEMETRY DOWNLINK ---
 def telemetry_downlink():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     while True:
-        # Added FPS to the packet
         packet = f"{NODE_ID},{node_status},{target_cx},{target_cy},{current_fps:.1f}"
-        sock.sendto(packet.encode('utf-8'), (TARGET_IP, TELEMETRY_PORT))
-        time.sleep(0.1) # 10 Hz
+        try:
+            sock.sendto(packet.encode('utf-8'), (TARGET_IP, TELEMETRY_PORT))
+        except Exception:
+            pass
+        time.sleep(0.1)
+
 
 threading.Thread(target=uplink_listener, daemon=True).start()
 threading.Thread(target=telemetry_downlink, daemon=True).start()
@@ -71,7 +80,6 @@ frame_count = 0
 
 try:
     while True:
-        # FPS Calculation
         curr_time = time.time()
         frame_count += 1
         if curr_time - last_time >= 1.0:
